@@ -13,6 +13,7 @@ $(TESTS): %: %.lama
 	@cat $@.input | LAMA=../runtime $(LAMAC) -i $< > $@.log && diff $@.log orig/$@.log
 	@cat $@.input | LAMA=../runtime $(LAMAC) -ds -s $< > $@.log && diff $@.log orig/$@.log
 	@LAMA=../runtime $(LAMAC) $< && cat $@.input | ./$@ > $@.log && diff $@.log orig/$@.log
+	@LAMA=../runtime $(LAMAC) -b $< && cat $@.input | ../interp/interp ./$@ > $@.log && diff $@.log orig/$@.log
 
 ctest111:
 	@echo "regression/test111"

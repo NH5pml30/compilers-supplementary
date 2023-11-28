@@ -20,20 +20,20 @@ extern size_t __gc_stack_top, __gc_stack_bottom;
   assert(__builtin_frame_address(0) <= (void *)__gc_stack_top);                                    \
   if (flag) { __gc_stack_top = 0; }
 
-static void vfailure (char *s, va_list args) {
+static void vfailure (const char *s, va_list args) {
   fprintf(stderr, "*** FAILURE: ");
   vfprintf(stderr, s, args);   // vprintf (char *, va_list) <-> printf (char *, ...)
   exit(255);
 }
 
-void failure (char *s, ...) {
+void failure (const char *s, ...) {
   va_list args;
 
   va_start(args, s);
   vfailure(s, args);
 }
 
-void Lassert (void *f, char *s, ...) {
+void Lassert (void *f, const char *s, ...) {
   if (!UNBOX(f)) {
     va_list args;
 

@@ -15,6 +15,6 @@
 
 #define WORD_SIZE (CHAR_BIT * sizeof(int))
 
-void failure (char *s, ...);
+void failure (const char *s, ...);
 
 #endif
