@@ -7,6 +7,7 @@
 #include <string>
 #include <memory>
 #include <stack>
+#include <algorithm>
 
 extern "C" {
 #include "../runtime/runtime_common.h"
@@ -20,28 +21,15 @@ extern "C" {
 
   int Lwrite (int n);
   int Lread ();
+  int Llength (void *p);
+
+  void *Bstring (void *p);
+  void *Belem (void *p, int i);
+  void *Bsta (void *v, int i, void *x);
+  void *Barray (int bn, ...);
 }
-
-template<typename... ArgTs>
-struct ArgPusher {
-  static void push(virt_stack *st, ArgTs... args) {}
-};
-
-template<typename ArgT, typename... ArgTs>
-struct ArgPusher<ArgT, ArgTs...> {
-  static void push(virt_stack *st, ArgT arg, ArgTs... args) {
-    ArgPusher<ArgTs...>::push(st, args...);
-    vstack_push(st, arg);
-  }
-};
 
 extern "C" size_t call_function_with_stack(void *st, void *f);
-
-template<typename RetT, typename... ArgTs>
-size_t call_runtime_function(virt_stack *st, RetT (*f)(ArgTs...), ArgTs... Args) {
-  ArgPusher<ArgTs...>::push(st, Args...);
-  return call_function_with_stack((char *)vstack_top(st) - 4, (void *)f);
-}
 
 /* The unpacked representation of bytecode file */
 struct bytefile {
@@ -74,17 +62,17 @@ struct bytefile {
   }
 
   /* Gets a string from a string table by an index */
-  char *get_string(int pos) {
+  const char *get_string(int pos) const {
     return &string_ptr[pos];
   }
 
   /* Gets a name for a public symbol */
-  char *get_public_name(int i) {
+  const char *get_public_name(int i) const {
     return get_string(public_ptr[i * 2]);
   }
 
   /* Gets an offset for a public symbol */
-  int get_public_offset(int i) {
+  int get_public_offset(int i) const {
     return public_ptr[i * 2 + 1];
   }
 
@@ -204,6 +192,11 @@ public:
 
   size_t pop() { return vstack_pop(st); }
 
+  void multipop(size_t n) {
+    st->cur += n;
+    if (st->cur > RUNTIME_VSTACK_SIZE) { assert(0); }
+  }
+
   size_t peek() {
     size_t val = vstack_pop(st);
     vstack_push(st, val);
@@ -219,7 +212,22 @@ public:
   }
 
   size_t *kth_from_start(size_t k) {
-    return (size_t *)top() + size() - 1 - k;
+    assert(vstack_size(st) > k);
+    return &st->buf[RUNTIME_VSTACK_SIZE - 1 - k];
+  }
+
+  template <typename RetT, typename... ArgTs>
+  size_t call_runtime_function(RetT (*f)(ArgTs...)) {
+    size_t res = call_function_with_stack((char *)top(), (void *)f);
+    multipop(sizeof...(ArgTs));
+    return res;
+  }
+
+  template <typename RetT, typename... ArgTs>
+  size_t call_runtime_function(RetT (*f)(ArgTs..., ...), size_t nvars) {
+    size_t res = call_function_with_stack((char *)top(), (void *)f);
+    multipop(sizeof...(ArgTs) + nvars);
+    return res;
   }
 
   ~VirtStack() { vstack_destruct(st); }
@@ -230,8 +238,8 @@ public:
   GC() { __init(); }
 
   void set_stack(VirtStack &st) {
-    __gc_stack_bottom = (size_t)st.top() - 4;
-    __gc_stack_top = (size_t)st.bottom();
+    __gc_stack_top = (size_t)st.top() - 4;
+    __gc_stack_bottom = (size_t)st.bottom();
   }
 };
 
@@ -263,9 +271,9 @@ class Interpreter {
     return *(int *)(ip - sizeof(int));
   }
 
-  char read_byte() { return *ip++; }
+  const char read_byte() { return *ip++; }
 
-  char *read_string() { return bf->get_string(read_int()); }
+  const char *read_string() { return bf->get_string(read_int()); }
 
   void read_inst() {
     char x = read_byte();
@@ -288,6 +296,10 @@ class Interpreter {
     return st.peek();
   }
 
+  void *top() {
+    return st.top();
+  }
+
   void push(size_t value) {
     st.push(value);
     gc.set_stack(st);
@@ -295,6 +307,20 @@ class Interpreter {
 
   size_t stack_size() {
     return st.size();
+  }
+
+  void swap_args(size_t n) {
+    std::reverse((size_t *)st.top(), (size_t *)st.top() + n);
+  }
+
+  template <typename RetT, typename... ArgTs>
+  size_t call_runtime_function(RetT (*f)(ArgTs...)) {
+    return st.call_runtime_function(f);
+  }
+
+  template <typename RetT, typename... ArgTs>
+  size_t call_runtime_function(RetT (*f)(ArgTs..., ...), size_t nvars) {
+    return st.call_runtime_function(f, nvars);
   }
 
   size_t *local(size_t k) {
@@ -402,10 +428,13 @@ public:
           break;
         }
 
-        case 1:
-          fprintf(f, "STRING\t%s", read_string());
+        case BC_L_STRING: {
+          const char *string = read_string();
+          fprintf(f, "STRING\t%s", string);
+          push((size_t)string);
+          push(call_runtime_function(Bstring));
           break;
-
+        }
         case 2:
           fprintf(f, "SEXP\t%s ", read_string());
           fprintf(f, "%d", read_int());
@@ -415,10 +444,11 @@ public:
           fprintf(f, "STI");
           break;
 
-        case 4:
+        case 4: {
           fprintf(f, "STA");
+          push(call_runtime_function(Bsta));
           break;
-
+        }
         case BC_L_JMP: {
           int to = read_int();
           fprintf(f, "JMP\t0x%.8x", to);
@@ -452,10 +482,12 @@ public:
           fprintf(f, "SWAP");
           break;
 
-        case 11:
+        case BC_L_ELEM: {
           fprintf(f, "ELEM");
+          swap_args(2);
+          push(call_runtime_function(Belem));
           break;
-
+        }
         default:
           fail();
         }
@@ -615,29 +647,31 @@ public:
         switch (l) {
         case 0:
           fprintf(f, "CALL\tLread");
-          push(Lread());
+          push(call_runtime_function(Lread));
           break;
 
-        case BC_L_WRITE:
+        case BC_L_WRITE: {
           fprintf(f, "CALL\tLwrite");
-          push(Lwrite(pop()));
-          // vstack_push(st, call_runtime_function(st, Lwrite,
-          // (int)vstack_pop(st))); vstack_push(st,
-          // call_function_with_stack(vstack_top(st), (void *)Lwrite));
+          push(call_runtime_function(Lwrite));
           break;
-
-        case 2:
+        }
+        case BC_L_LENGTH:
           fprintf(f, "CALL\tLlength");
+          push(call_runtime_function(Llength));
           break;
 
         case 3:
           fprintf(f, "CALL\tLstring");
           break;
 
-        case 4:
-          fprintf(f, "CALL\tBarray\t%d", read_int());
+        case BC_L_ARRAY: {
+          int n = read_int();
+          fprintf(f, "CALL\tBarray\t%d", n);
+          swap_args(n);
+          push(BOX(n));
+          push(call_runtime_function(Barray, n));
           break;
-
+        }
         default:
           fail();
         }

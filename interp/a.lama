@@ -1,19 +1,17 @@
-var n, x, i;
+var x;
 
-fun printString (x) {
-  for i:=0, i<x.length, i:=i+1 do
-    write (x[i])    
-  od
+fun f (x) {
+  case x of
+    A -> write (1)
+  | B -> write (2)
+  | C -> write (3)
+  | _  -> write (4)
+  esac
 }
 
-n := read ();
+x := read ();
 
-x := "abcdefgh";
-
-printString (x);
-
-for i:=0, i<x.length, i:=i+1 do
-  x[i] := x[i]+2
-od;
-
-printString (x)
+f (A);
+f (B);
+f (C);
+f (D)
