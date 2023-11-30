@@ -22,11 +22,15 @@ extern "C" {
   int Lwrite (int n);
   int Lread ();
   int Llength (void *p);
+  int LtagHash (char *s);
+  void *Lstring (void *p);
 
   void *Bstring (void *p);
   void *Belem (void *p, int i);
   void *Bsta (void *v, int i, void *x);
   void *Barray (int bn, ...);
+  void *Bsexp (int n, ...);
+  int Btag (void *d, int t, int n);
 }
 
 extern "C" size_t call_function_with_stack(void *st, void *f);
@@ -197,37 +201,34 @@ public:
     if (st->cur > RUNTIME_VSTACK_SIZE) { assert(0); }
   }
 
-  size_t peek() {
-    size_t val = vstack_pop(st);
-    vstack_push(st, val);
-    return val;
-  }
+  size_t peek() { return st->buf[st->cur]; }
 
   void *top() { return vstack_top(st); }
-
-  void *bottom() { return (size_t *)vstack_top(st) + vstack_size(st); }
+  void *bottom() { return &st->buf[RUNTIME_VSTACK_SIZE]; }
 
   size_t size() {
     return vstack_size(st);
   }
 
-  size_t *kth_from_start(size_t k) {
-    assert(vstack_size(st) > k);
+  size_t *kth_from_bottom(size_t k) {
+    assert(size() >= k);
     return &st->buf[RUNTIME_VSTACK_SIZE - 1 - k];
+  }
+
+  size_t *kth_from_top(size_t k) {
+    size_t size_ = size();
+    assert(size_ >= k);
+    return &st->buf[st->cur + k];
   }
 
   template <typename RetT, typename... ArgTs>
   size_t call_runtime_function(RetT (*f)(ArgTs...)) {
-    size_t res = call_function_with_stack((char *)top(), (void *)f);
-    multipop(sizeof...(ArgTs));
-    return res;
+    return call_function_with_stack((char *)top(), (void *)f);
   }
 
   template <typename RetT, typename... ArgTs>
   size_t call_runtime_function(RetT (*f)(ArgTs..., ...), size_t nvars) {
-    size_t res = call_function_with_stack((char *)top(), (void *)f);
-    multipop(sizeof...(ArgTs) + nvars);
-    return res;
+    return call_function_with_stack((char *)top(), (void *)f);
   }
 
   ~VirtStack() { vstack_destruct(st); }
@@ -237,9 +238,13 @@ class GC {
 public:
   GC() { __init(); }
 
+  void set_stack(void *top, void *bottom) {
+    __gc_stack_top = (size_t)top - 4;
+    __gc_stack_bottom = (size_t)bottom;
+  }
+
   void set_stack(VirtStack &st) {
-    __gc_stack_top = (size_t)st.top() - 4;
-    __gc_stack_bottom = (size_t)st.bottom();
+    set_stack(st.top(), st.bottom());
   }
 };
 
@@ -292,6 +297,11 @@ class Interpreter {
     return res;
   }
 
+  void multipop(size_t n) {
+    st.multipop(n);
+    gc.set_stack(st);
+  }
+
   size_t peek() {
     return st.peek();
   }
@@ -310,26 +320,34 @@ class Interpreter {
   }
 
   void swap_args(size_t n) {
-    std::reverse((size_t *)st.top(), (size_t *)st.top() + n);
+    std::reverse((size_t *)st.top(), (size_t *)st.kth_from_top(n));
   }
 
   template <typename RetT, typename... ArgTs>
   size_t call_runtime_function(RetT (*f)(ArgTs...)) {
-    return st.call_runtime_function(f);
+    size_t nargs = sizeof...(ArgTs);
+    // gc.set_stack(st.kth_from_top(nargs), st.bottom());
+    size_t res = st.call_runtime_function(f);
+    st.multipop(nargs);
+    return res;
   }
 
   template <typename RetT, typename... ArgTs>
   size_t call_runtime_function(RetT (*f)(ArgTs..., ...), size_t nvars) {
-    return st.call_runtime_function(f, nvars);
+    size_t nargs = sizeof...(ArgTs) + nvars;
+    // gc.set_stack(st.kth_from_top(nargs), st.bottom());
+    size_t res = st.call_runtime_function(f, nvars);
+    st.multipop(nargs);
+    return res;
   }
 
   size_t *local(size_t k) {
-    return st.kth_from_start(call_stack.top().vstack_begin +
-                             call_stack.top().n_args + k);
+    return st.kth_from_bottom(call_stack.top().vstack_begin +
+                              call_stack.top().n_args + k);
   }
 
   size_t *arg(size_t k) {
-    return st.kth_from_start(call_stack.top().vstack_begin + k);
+    return st.kth_from_bottom(call_stack.top().vstack_begin + k);
   }
 
   struct stack_frame {
@@ -347,8 +365,7 @@ class Interpreter {
   }
 
   void dealloc_locals(size_t n) {
-    for (size_t i = 0; i < n; i++)
-      pop();
+    multipop(n);
   }
 
 public:
@@ -435,17 +452,28 @@ public:
           push(call_runtime_function(Bstring));
           break;
         }
-        case 2:
-          fprintf(f, "SEXP\t%s ", read_string());
-          fprintf(f, "%d", read_int());
+        case BC_L_SEXP: {
+          const char *tag = read_string();
+          int n = read_int();
+          fprintf(f, "SEXP\t%s ", tag);
+          fprintf(f, "%d", n);
+          push((size_t)tag);
+          push(call_runtime_function(LtagHash));
+          swap_args(n + 1);
+          push(BOX(n + 1));
+          push(call_runtime_function(Bsexp, n + 1));
           break;
-
+        }
         case 3:
           fprintf(f, "STI");
           break;
 
-        case 4: {
+        case BC_L_STA: {
           fprintf(f, "STA");
+          if (!UNBOXED(*st.kth_from_top(1))) {
+            push(0);
+            swap_args(2);
+          }
           push(call_runtime_function(Bsta));
           break;
         }
@@ -474,8 +502,9 @@ public:
           pop();
           break;
 
-        case 9:
+        case BC_L_DUP:
           fprintf(f, "DUP");
+          push(peek());
           break;
 
         case 10:
@@ -494,7 +523,8 @@ public:
         break;
       }
       case BC_H_LD:
-      case BC_H_ST: {
+      case BC_H_ST:
+      case BC_H_LDA: {
         fprintf(f, "%s\t", lds[h - 2]);
         int idx = read_int();
         size_t *ptr{};
@@ -504,11 +534,11 @@ public:
           fprintf(f, "G(%d)", idx);
           ptr = bf->get_global(idx);
           break;
-        case 1:
+        case BC_L_L:
           fprintf(f, "L(%d)", idx);
           ptr = local(idx);
           break;
-        case 2:
+        case BC_L_A:
           fprintf(f, "A(%d)", idx);
           ptr = arg(idx);
           break;
@@ -522,31 +552,15 @@ public:
         case BC_H_LD:
           push(*ptr);
           break;
+        case BC_H_LDA:
+          push((size_t)ptr);
+          break;
         case BC_H_ST:
           *ptr = peek();
           break;
         }
         break;
       }
-      case 3:
-        fprintf(f, "%s\t", lds[h - 2]);
-        switch (l) {
-        case 0:
-          fprintf(f, "G(%d)", read_int());
-          break;
-        case 1:
-          fprintf(f, "L(%d)", read_int());
-          break;
-        case 2:
-          fprintf(f, "A(%d)", read_int());
-          break;
-        case 3:
-          fprintf(f, "C(%d)", read_int());
-          break;
-        default:
-          fail();
-        }
-        break;
       case BC_H_CONTROL: {
         using namespace BC_L_CONTROL;
         switch (l) {
@@ -615,11 +629,18 @@ public:
           ip = &bf->code_ptr[addr];
           break;
         }
-        case 7:
-          fprintf(f, "TAG\t%s ", read_string());
-          fprintf(f, "%d", read_int());
+        case BC_L_TAG: {
+          const char *tag = read_string();
+          int n = read_int();
+          fprintf(f, "TAG\t%s ", tag);
+          fprintf(f, "%d", n);
+          push((size_t)tag);
+          push(call_runtime_function(LtagHash));
+          push(BOX(n));
+          swap_args(3);
+          push(call_runtime_function(Btag));
           break;
-
+        }
         case 8:
           fprintf(f, "ARRAY\t%d", read_int());
           break;
@@ -660,8 +681,9 @@ public:
           push(call_runtime_function(Llength));
           break;
 
-        case 3:
+        case BC_L_STRING:
           fprintf(f, "CALL\tLstring");
+          push(call_runtime_function(Lstring));
           break;
 
         case BC_L_ARRAY: {
