@@ -1,4 +1,7 @@
-FLAGS=-m32 -g2 -fstack-protector-all
+CC=gcc
+CCXX=g++
+FLAGS=-m32 -g2 -fstack-protector-all -O3
+# FLAGS=-m32 -g2 -fstack-protector-all -O0 -DDEBUG
 
 all: interp.o interp_util.s virt_stack.o gc.o runtime.o
 	$(CCXX) $(FLAGS) -o interp interp.o interp_util.s virt_stack.o gc.o runtime.o
