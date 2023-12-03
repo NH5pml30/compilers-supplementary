@@ -14,7 +14,6 @@
 extern "C" {
 #include "../runtime/runtime_common.h"
 #include "../runtime/runtime.h"
-#include "../runtime/virt_stack.h"
 #include "../runtime/gc.h"
 
   extern size_t __gc_stack_top, __gc_stack_bottom;
@@ -43,6 +42,7 @@ extern "C" {
   void Bmatch_failure(void *v, char *fname, int line, int col);
 }
 
+namespace {
 class Logger {
 private:
   Logger(std::ostream &o) : o(&o) {}
@@ -256,40 +256,46 @@ enum BC_L_PATT {
 };
 }
 
+constexpr size_t RUNTIME_VSTACK_SIZE = 100000;
+
 /* Virtual stack wrapper */
 class VirtStack {
-  virt_stack *st;
+  size_t buf[RUNTIME_VSTACK_SIZE + 1];
+  size_t cur = RUNTIME_VSTACK_SIZE;
 
 public:
-  VirtStack() : st(vstack_create()) { vstack_init(st); }
+  VirtStack() { buf[cur] = 0; }
 
-  void push(size_t value) { vstack_push(st, value); }
+  void push(size_t value) {
+    assert(cur != 0);
+    buf[--cur] = value;
+  }
 
-  size_t pop() { return vstack_pop(st); }
+  size_t pop() {
+    assert(cur != RUNTIME_VSTACK_SIZE);
+    return buf[cur++];
+  }
 
   void multipop(size_t n) {
-    st->cur += n;
-    if (st->cur > RUNTIME_VSTACK_SIZE) { assert(0); }
+    cur += n;
+    assert(cur <= RUNTIME_VSTACK_SIZE);
   }
 
-  size_t peek() { return st->buf[st->cur]; }
+  size_t peek() { return buf[cur]; }
 
-  void *top() { return vstack_top(st); }
-  void *bottom() { return &st->buf[RUNTIME_VSTACK_SIZE]; }
+  void *top() { return &buf[cur]; }
+  void *bottom() { return &buf[RUNTIME_VSTACK_SIZE]; }
 
-  size_t size() {
-    return vstack_size(st);
-  }
+  size_t size() { return RUNTIME_VSTACK_SIZE - cur; }
 
   size_t *kth_from_bottom(size_t k) {
     assert(size() >= k);
-    return &st->buf[RUNTIME_VSTACK_SIZE - 1 - k];
+    return &buf[RUNTIME_VSTACK_SIZE - 1 - k];
   }
 
   size_t *kth_from_top(size_t k) {
-    size_t size_ = size();
-    assert(size_ >= k);
-    return &st->buf[st->cur + k];
+    assert(size() >= k);
+    return &buf[cur + k];
   }
 
   /* Call function on this stack */
@@ -338,8 +344,6 @@ public:
     }
     Logger::log("Stack content end.");
   }
-
-  ~VirtStack() { vstack_destruct(st); }
 };
 
 /* GC wrapper */
@@ -361,7 +365,7 @@ public:
 class Interpreter {
   bytefile_ptr bf;
   GC gc;
-  VirtStack st;
+  std::unique_ptr<VirtStack> st = std::make_unique<VirtStack>();
 
   char *get_entry_point() {
     using namespace std::string_literals;
@@ -403,8 +407,8 @@ class Interpreter {
 
   /* Pass through functions to the stack */
   size_t pop() {
-    size_t res = st.pop();
-    gc.set_stack(st);
+    size_t res = st->pop();
+    gc.set_stack(*st);
     return res;
   }
 
@@ -419,35 +423,35 @@ class Interpreter {
     swap_args(k_from_top + 1);
     size_t res = pop();
     swap_args(k_from_top);
-    gc.set_stack(st);
+    gc.set_stack(*st);
     return res;
   }
 
   void multipop(size_t n) {
-    st.multipop(n);
-    gc.set_stack(st);
+    st->multipop(n);
+    gc.set_stack(*st);
   }
 
   size_t peek() {
-    return st.peek();
+    return st->peek();
   }
 
   void *top() {
-    return st.top();
+    return st->top();
   }
 
   void push(size_t value) {
-    st.push(value);
-    gc.set_stack(st);
+    st->push(value);
+    gc.set_stack(*st);
   }
 
   size_t stack_size() {
-    return st.size();
+    return st->size();
   }
 
   // Reverse the order of last n stack entries
   void swap_args(size_t n) {
-    std::reverse((size_t *)st.top(), (size_t *)st.kth_from_top(n));
+    std::reverse(st->kth_from_top(0), st->kth_from_top(n));
   }
 
   /* Runtime functions need to be called on the virtual stack - calls and clears
@@ -455,16 +459,16 @@ class Interpreter {
   template <typename RetT, typename... ArgTs>
   size_t call_runtime_function(RetT (*f)(ArgTs...)) {
     size_t nargs = sizeof...(ArgTs);
-    size_t res = st.call_runtime_function(f);
-    st.multipop(nargs);
+    size_t res = st->call_runtime_function(f);
+    st->multipop(nargs);
     return res;
   }
 
   template <typename RetT, typename... ArgTs>
   size_t call_runtime_function(RetT (*f)(ArgTs..., ...), size_t nvars) {
     size_t nargs = sizeof...(ArgTs) + nvars;
-    size_t res = st.call_runtime_function(f);
-    st.multipop(nargs);
+    size_t res = st->call_runtime_function(f);
+    st->multipop(nargs);
     return res;
   }
 
@@ -506,17 +510,17 @@ class Interpreter {
 
   /* Pass through functions to the last call stack entry */
   size_t *arg(size_t k) {
-    return st.kth_from_bottom(call_stack.top().arg(k));
+    return st->kth_from_bottom(call_stack.top().arg(k));
   }
 
   size_t *captured(size_t k) {
-    size_t closure = *st.kth_from_bottom(call_stack.top().closure());
+    size_t closure = *st->kth_from_bottom(call_stack.top().closure());
     data *a = TO_DATA((void *)closure);
     return &((size_t *)a->contents)[k + 1];
   }
 
   size_t *local(size_t k) {
-    return st.kth_from_bottom(call_stack.top().local(k));
+    return st->kth_from_bottom(call_stack.top().local(k));
   }
 
   std::stack<stack_frame> call_stack;
@@ -659,7 +663,7 @@ public:
 
         case BC_L_STA:
           Logger::log("STA");
-          if (!UNBOXED(*st.kth_from_top(1))) {
+          if (!UNBOXED(*st->kth_from_top(1))) {
             push(0);
             swap_args(2);
           }
@@ -685,7 +689,7 @@ public:
           }
           call_stack.pop();
           push(ret);
-          INTERP_DEBUG(st.print_stack_content());
+          INTERP_DEBUG(st->print_stack_content());
           break;
         }
         case BC_L_DROP:
@@ -793,8 +797,8 @@ public:
           int n_args = read_int();
           Logger::log("CALLC\t", n_args);
           INTERP_DEBUG(Logger::log("\n-> stack state before:");
-                       st.print_stack_content());
-          data *closure = TO_DATA((void *)*st.kth_from_top(n_args));
+                       st->print_stack_content());
+          data *closure = TO_DATA((void *)*st->kth_from_top(n_args));
           if (TAG(closure->data_header) != CLOSURE_TAG)
             failure("Expected closure entry on stack, got %d!",
                     TAG(closure->data_header));
@@ -802,7 +806,7 @@ public:
           call_stack.emplace(ip, stack_size(), true, n_args, 0);
           ip = &bf->code_ptr[addr];
           INTERP_DEBUG(Logger::log("\n-> stack state after:");
-                       st.print_stack_content());
+                       st->print_stack_content());
           break;
         }
         case BC_L_CALL: {
@@ -812,7 +816,7 @@ public:
                       " ", n_args);
           call_stack.emplace(ip, stack_size(), false, n_args, 0);
           ip = &bf->code_ptr[addr];
-          INTERP_DEBUG(st.print_stack_content());
+          INTERP_DEBUG(st->print_stack_content());
           break;
         }
         case BC_L_TAG: {
@@ -947,6 +951,8 @@ void dump_file (bytefile_ptr bf) {
   Interpreter interp(std::move(bf));
   interp.interpret();
 }
+
+} // anonymous namespace
 
 int main (int argc, char* argv[]) {
   dump_file(read_file(argv[1]));

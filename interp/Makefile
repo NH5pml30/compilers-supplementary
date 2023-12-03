@@ -3,11 +3,8 @@ CCXX=g++
 FLAGS=-m32 -g2 -fstack-protector-all -O3
 # FLAGS=-m32 -g2 -fstack-protector-all -O0 -DDEBUG
 
-all: interp.o interp_util.s virt_stack.o gc.o runtime.o
-	$(CCXX) $(FLAGS) -o interp interp.o interp_util.s virt_stack.o gc.o runtime.o
-
-virt_stack.o: ../runtime/virt_stack.h ../runtime/virt_stack.c
-	$(CC) $(FLAGS) -DLAMA_ENV -c ../runtime/virt_stack.c
+all: interp.o interp_util.s gc.o runtime.o
+	$(CCXX) $(FLAGS) -o interp interp.o interp_util.s gc.o runtime.o
 
 gc.o: ../runtime/gc.c ../runtime/gc.h
 	$(CC) -rdynamic $(FLAGS) -DLAMA_ENV -c ../runtime/gc.c
