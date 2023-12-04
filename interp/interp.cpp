@@ -263,49 +263,59 @@ class VirtStack {
   size_t buf[RUNTIME_VSTACK_SIZE + 1];
   size_t cur = RUNTIME_VSTACK_SIZE;
 
+  static std::unique_ptr<VirtStack> instance;
+
+  VirtStack() {
+    buf[cur] = 0;
+    __gc_stack_top = (size_t)&buf[RUNTIME_VSTACK_SIZE - 1];
+    __gc_stack_bottom = (size_t)&buf[RUNTIME_VSTACK_SIZE];
+    __init();
+  }
+
 public:
-  VirtStack() { buf[cur] = 0; }
-
-  void push(size_t value) {
-    assert(cur != 0);
-    buf[--cur] = value;
+  static void push(size_t value) {
+    assert(size() < RUNTIME_VSTACK_SIZE);
+    __gc_stack_top -= sizeof(size_t);
+    *top() = value;
   }
 
-  size_t pop() {
-    assert(cur != RUNTIME_VSTACK_SIZE);
-    return buf[cur++];
+  static size_t pop() {
+    assert(size() >= 1);
+    size_t res = peek();
+    __gc_stack_top += sizeof(size_t);
+    return res;
   }
 
-  void multipop(size_t n) {
-    cur += n;
-    assert(cur <= RUNTIME_VSTACK_SIZE);
+  static void multipop(size_t n) {
+    assert(size() >= n);
+    __gc_stack_top += sizeof(size_t) * n;
   }
 
-  size_t peek() { return buf[cur]; }
+  static size_t peek() { return *top(); }
 
-  void *top() { return &buf[cur]; }
-  void *bottom() { return &buf[RUNTIME_VSTACK_SIZE]; }
+  static size_t *top() { return (size_t *)__gc_stack_top + 1; }
+  static size_t *bottom() { return (size_t *)__gc_stack_bottom; }
 
-  size_t size() { return RUNTIME_VSTACK_SIZE - cur; }
+  static size_t size() { return bottom() - top(); }
 
-  size_t *kth_from_bottom(size_t k) {
+  static size_t *kth_from_bottom(size_t k) {
     assert(size() >= k);
-    return &buf[RUNTIME_VSTACK_SIZE - 1 - k];
+    return bottom() - 1 - k;
   }
 
-  size_t *kth_from_top(size_t k) {
+  static size_t *kth_from_top(size_t k) {
     assert(size() >= k);
-    return &buf[cur + k];
+    return top() + k;
   }
 
   /* Call function on this stack */
   template <typename RetT, typename... ArgTs>
-  size_t call_runtime_function(RetT (*f)(ArgTs...)) {
+  static size_t call_runtime_function(RetT (*f)(ArgTs...)) {
     return call_function_with_stack((char *)top(), (void *)f);
   }
 
   template <typename RetT, typename... ArgTs>
-  size_t call_runtime_function(RetT (*f)(ArgTs..., ...)) {
+  static size_t call_runtime_function(RetT (*f)(ArgTs..., ...)) {
     return call_function_with_stack((char *)top(), (void *)f);
   }
 
@@ -334,7 +344,7 @@ public:
     }
   }
 
-  void print_stack_content() {
+  static void print_stack_content() {
     Logger::log("\nStack content:\n");
     for (size_t *stack_ptr = kth_from_top(0); stack_ptr <= kth_from_bottom(0);
          ++stack_ptr) {
@@ -346,26 +356,12 @@ public:
   }
 };
 
-/* GC wrapper */
-class GC {
-public:
-  GC() { __init(); }
-
-  void set_stack(void *top, void *bottom) {
-    __gc_stack_top = (size_t)top - 4;
-    __gc_stack_bottom = (size_t)bottom;
-  }
-
-  void set_stack(VirtStack &st) {
-    set_stack(st.top(), st.bottom());
-  }
-};
+std::unique_ptr<VirtStack> VirtStack::instance =
+    std::unique_ptr<VirtStack>(new VirtStack());
 
 /* Interpreter class */
 class Interpreter {
   bytefile_ptr bf;
-  GC gc;
-  std::unique_ptr<VirtStack> st = std::make_unique<VirtStack>();
 
   char *get_entry_point() {
     using namespace std::string_literals;
@@ -406,69 +402,33 @@ class Interpreter {
   }
 
   /* Pass through functions to the stack */
-  size_t pop() {
-    size_t res = st->pop();
-    gc.set_stack(*st);
-    return res;
-  }
-
-  int pop_unbox() {
-    size_t res = pop();
+  static int pop_unbox() {
+    size_t res = VirtStack::pop();
     if (!UNBOXED(res))
       failure("Expected value entry on stack!");
     return UNBOX(res);
   }
 
-  size_t erase(size_t k_from_top) {
-    swap_args(k_from_top + 1);
-    size_t res = pop();
-    swap_args(k_from_top);
-    gc.set_stack(*st);
-    return res;
-  }
-
-  void multipop(size_t n) {
-    st->multipop(n);
-    gc.set_stack(*st);
-  }
-
-  size_t peek() {
-    return st->peek();
-  }
-
-  void *top() {
-    return st->top();
-  }
-
-  void push(size_t value) {
-    st->push(value);
-    gc.set_stack(*st);
-  }
-
-  size_t stack_size() {
-    return st->size();
-  }
-
   // Reverse the order of last n stack entries
-  void swap_args(size_t n) {
-    std::reverse(st->kth_from_top(0), st->kth_from_top(n));
+  static void swap_args(size_t n) {
+    std::reverse(VirtStack::kth_from_top(0), VirtStack::kth_from_top(n));
   }
 
   /* Runtime functions need to be called on the virtual stack - calls and clears
    * the arguments off the stack */
   template <typename RetT, typename... ArgTs>
-  size_t call_runtime_function(RetT (*f)(ArgTs...)) {
+  static size_t call_runtime_function(RetT (*f)(ArgTs...)) {
     size_t nargs = sizeof...(ArgTs);
-    size_t res = st->call_runtime_function(f);
-    st->multipop(nargs);
+    size_t res = VirtStack::call_runtime_function(f);
+    VirtStack::multipop(nargs);
     return res;
   }
 
   template <typename RetT, typename... ArgTs>
-  size_t call_runtime_function(RetT (*f)(ArgTs..., ...), size_t nvars) {
+  static size_t call_runtime_function(RetT (*f)(ArgTs..., ...), size_t nvars) {
     size_t nargs = sizeof...(ArgTs) + nvars;
-    size_t res = st->call_runtime_function(f);
-    st->multipop(nargs);
+    size_t res = VirtStack::call_runtime_function(f);
+    VirtStack::multipop(nargs);
     return res;
   }
 
@@ -510,24 +470,24 @@ class Interpreter {
 
   /* Pass through functions to the last call stack entry */
   size_t *arg(size_t k) {
-    return st->kth_from_bottom(call_stack.top().arg(k));
+    return VirtStack::kth_from_bottom(call_stack.top().arg(k));
   }
 
   size_t *captured(size_t k) {
-    size_t closure = *st->kth_from_bottom(call_stack.top().closure());
+    size_t closure = *VirtStack::kth_from_bottom(call_stack.top().closure());
     data *a = TO_DATA((void *)closure);
     return &((size_t *)a->contents)[k + 1];
   }
 
   size_t *local(size_t k) {
-    return st->kth_from_bottom(call_stack.top().local(k));
+    return VirtStack::kth_from_bottom(call_stack.top().local(k));
   }
 
   std::stack<stack_frame> call_stack;
 
   void alloc_locals(size_t n) {
     for (size_t i = 0; i < n; i++)
-      push(0);
+      VirtStack::push(0);
   }
 
   size_t *get_var(char l, int idx) {
@@ -558,9 +518,9 @@ public:
 
   void interpret() {
     // call main with 2 args
-    push(0);
-    push(0);
-    call_stack.emplace(nullptr, stack_size(), false, 2, 0);
+    VirtStack::push(0);
+    VirtStack::push(0);
+    call_stack.emplace(nullptr, VirtStack::size(), false, 2, 0);
     ip = get_entry_point();
 
     while (ip != nullptr) {
@@ -576,8 +536,8 @@ public:
 
       case BC_H_BINOP: {
         Logger::log("BINOP\t", ops[l - 1]);
-        int Y = UNBOX(pop());
-        int X = UNBOX(pop());
+        int Y = UNBOX(VirtStack::pop());
+        int X = UNBOX(VirtStack::pop());
         int R{};
         using namespace BC_L_BINOP;
         switch (l) {
@@ -623,7 +583,7 @@ public:
         default:
           fail();
         }
-        push(BOX(R));
+        VirtStack::push(BOX(R));
         break;
       }
 
@@ -633,41 +593,41 @@ public:
         case BC_L_CONST: {
           size_t R = read_int();
           Logger::log("CONST\t", R);
-          push(BOX(R));
+          VirtStack::push(BOX(R));
           break;
         }
         case BC_L_STRING: {
           const char *string = read_string();
           Logger::log("STRING\t", string);
-          push((size_t)string);
-          push(call_runtime_function(Bstring));
+          VirtStack::push((size_t)string);
+          VirtStack::push(call_runtime_function(Bstring));
           break;
         }
         case BC_L_SEXP: {
           const char *tag = read_string();
           int n = read_int();
           Logger::log("SEXP\t ", tag, " ", n);
-          push((size_t)tag);
-          push(call_runtime_function(LtagHash));
+          VirtStack::push((size_t)tag);
+          VirtStack::push(call_runtime_function(LtagHash));
           swap_args(n + 1);
-          push(BOX(n + 1));
-          push(call_runtime_function(Bsexp, n + 1));
+          VirtStack::push(BOX(n + 1));
+          VirtStack::push(call_runtime_function(Bsexp, n + 1));
           break;
         }
         case BC_L_STI: // Unsure if it's generated => not tested
           Logger::log("STI");
-          push(0);
+          VirtStack::push(0);
           swap_args(2);
-          push(call_runtime_function(Bsta));
+          VirtStack::push(call_runtime_function(Bsta));
           break;
 
         case BC_L_STA:
           Logger::log("STA");
-          if (!UNBOXED(*st->kth_from_top(1))) {
-            push(0);
+          if (!UNBOXED(*VirtStack::kth_from_top(1))) {
+            VirtStack::push(0);
             swap_args(2);
           }
-          push(call_runtime_function(Bsta));
+          VirtStack::push(call_runtime_function(Bsta));
           break;
 
         case BC_L_JMP: {
@@ -679,27 +639,27 @@ public:
         case BC_L_END:
         case BC_L_RET: { // Unsure if it's generated => not tested
           Logger::log(l == BC_L_END ? "END" : "RET");
-          size_t ret = pop();
+          size_t ret = VirtStack::pop();
           {
             auto &frame = call_stack.top();
-            Logger::log("\n -> popped ", stack_size() - frame.vstack_begin,
+            Logger::log("\n -> popped ", VirtStack::size() - frame.vstack_begin,
                         " elems");
-            multipop(stack_size() - frame.vstack_begin);
+            VirtStack::multipop(VirtStack::size() - frame.vstack_begin);
             ip = frame.return_address;
           }
           call_stack.pop();
-          push(ret);
-          INTERP_DEBUG(st->print_stack_content());
+          VirtStack::push(ret);
+          INTERP_DEBUG(VirtStack::print_stack_content());
           break;
         }
         case BC_L_DROP:
           Logger::log("DROP");
-          pop();
+          VirtStack::pop();
           break;
 
         case BC_L_DUP:
           Logger::log("DUP");
-          push(peek());
+          VirtStack::push(VirtStack::peek());
           break;
 
         case BC_L_SWAP: // Unsure if it's generated => not tested
@@ -710,7 +670,7 @@ public:
         case BC_L_ELEM: {
           Logger::log("ELEM");
           swap_args(2);
-          push(call_runtime_function(Belem));
+          VirtStack::push(call_runtime_function(Belem));
           break;
         }
         default:
@@ -726,13 +686,13 @@ public:
         size_t *ptr = get_var(l, idx);
         switch (h) {
         case BC_H_LD:
-          push(*ptr);
+          VirtStack::push(*ptr);
           break;
         case BC_H_LDA:
-          push((size_t)ptr);
+          VirtStack::push((size_t)ptr);
           break;
         case BC_H_ST:
-          *ptr = peek();
+          *ptr = VirtStack::peek();
           break;
         default:
           fail();
@@ -744,15 +704,17 @@ public:
         switch (l) {
         case BC_L_CJMPz: {
           int to = read_int();
-          Logger::log("CJMPz\t0x", std::hex, std::setw(8), std::setfill('0'), to);
-          if (UNBOX(pop()) == 0)
+          Logger::log("CJMPz\t0x", std::hex, std::setw(8), std::setfill('0'),
+                      to);
+          if (UNBOX(VirtStack::pop()) == 0)
             ip = &bf->code_ptr[to];
           break;
         }
         case BC_L_CJMPnz: {
           int to = read_int();
-          Logger::log("CJMPnz\t0x", std::hex, std::setw(8), std::setfill('0'), to);
-          if (UNBOX(pop()))
+          Logger::log("CJMPnz\t0x", std::hex, std::setw(8), std::setfill('0'),
+                      to);
+          if (UNBOX(VirtStack::pop()))
             ip = &bf->code_ptr[to];
           break;
         }
@@ -785,65 +747,65 @@ public:
             Logger::log("\n-> ", i, "-th capture: ");
             size_t *ptr = get_var(l, idx);
             VirtStack::print_info(*ptr);
-            push(*ptr);
+            VirtStack::push(*ptr);
           }
           swap_args(n);
-          push(addr);
-          push(BOX(n));
-          push(call_runtime_function(Bclosure, n));
+          VirtStack::push(addr);
+          VirtStack::push(BOX(n));
+          VirtStack::push(call_runtime_function(Bclosure, n));
           break;
         }
         case BC_L_CALLC: {
           int n_args = read_int();
           Logger::log("CALLC\t", n_args);
           INTERP_DEBUG(Logger::log("\n-> stack state before:");
-                       st->print_stack_content());
-          data *closure = TO_DATA((void *)*st->kth_from_top(n_args));
+                       VirtStack::print_stack_content());
+          data *closure = TO_DATA((void *)*VirtStack::kth_from_top(n_args));
           if (TAG(closure->data_header) != CLOSURE_TAG)
             failure("Expected closure entry on stack, got %d!",
                     TAG(closure->data_header));
           int addr = (int)((size_t *)closure->contents)[0];
-          call_stack.emplace(ip, stack_size(), true, n_args, 0);
+          call_stack.emplace(ip, VirtStack::size(), true, n_args, 0);
           ip = &bf->code_ptr[addr];
           INTERP_DEBUG(Logger::log("\n-> stack state after:");
-                       st->print_stack_content());
+                       VirtStack::print_stack_content());
           break;
         }
         case BC_L_CALL: {
           int addr = read_int();
           int n_args = read_int();
-          Logger::log("CALL\t0x", std::hex, std::setw(8), std::setfill('0'), addr,
-                      " ", n_args);
-          call_stack.emplace(ip, stack_size(), false, n_args, 0);
+          Logger::log("CALL\t0x", std::hex, std::setw(8), std::setfill('0'),
+                      addr, " ", n_args);
+          call_stack.emplace(ip, VirtStack::size(), false, n_args, 0);
           ip = &bf->code_ptr[addr];
-          INTERP_DEBUG(st->print_stack_content());
+          INTERP_DEBUG(VirtStack::print_stack_content());
           break;
         }
         case BC_L_TAG: {
           const char *tag = read_string();
           int n = read_int();
           Logger::log("TAG\t ", tag, " ", n);
-          push((size_t)tag);
-          push(call_runtime_function(LtagHash));
-          push(BOX(n));
+          VirtStack::push((size_t)tag);
+          VirtStack::push(call_runtime_function(LtagHash));
+          VirtStack::push(BOX(n));
           swap_args(3);
-          push(call_runtime_function(Btag));
+          VirtStack::push(call_runtime_function(Btag));
           break;
         }
         case BC_L_ARRAY: {
           int n = read_int();
           Logger::log("ARRAY\t", n);
-          push(BOX(n));
+          VirtStack::push(BOX(n));
           swap_args(2);
-          push(call_runtime_function(Barray_patt));
+          VirtStack::push(call_runtime_function(Barray_patt));
           break;
         }
         case BC_L_FAIL: {
           int line = read_int(), col = read_int();
           Logger::log("FAIL\t", line, ":", col);
-          push((size_t)"<unknown>");
-          push(BOX(line));
-          push(BOX(col));
+          VirtStack::push((size_t) "<unknown>");
+          VirtStack::push(BOX(line));
+          VirtStack::push(BOX(col));
           swap_args(4);
           call_runtime_function(Bmatch_failure); // noreturn
           abort();
@@ -863,25 +825,25 @@ public:
         using namespace BC_L_PATT;
         switch (l) {
         case BC_L_EQ_STR:
-          push(call_runtime_function(Bstring_patt));
+          VirtStack::push(call_runtime_function(Bstring_patt));
           break;
         case BC_L_STRING:
-          push(call_runtime_function(Bstring_tag_patt));
+          VirtStack::push(call_runtime_function(Bstring_tag_patt));
           break;
         case BC_L_ARRAY:
-          push(call_runtime_function(Barray_tag_patt));
+          VirtStack::push(call_runtime_function(Barray_tag_patt));
           break;
         case BC_L_SEXP:
-          push(call_runtime_function(Bsexp_tag_patt));
+          VirtStack::push(call_runtime_function(Bsexp_tag_patt));
           break;
         case BC_L_BOX:
-          push(call_runtime_function(Bboxed_patt));
+          VirtStack::push(call_runtime_function(Bboxed_patt));
           break;
         case BC_L_VAL:
-          push(call_runtime_function(Bunboxed_patt));
+          VirtStack::push(call_runtime_function(Bunboxed_patt));
           break;
         case BC_L_FUN:
-          push(call_runtime_function(Bclosure_tag_patt));
+          VirtStack::push(call_runtime_function(Bclosure_tag_patt));
           break;
         default:
           fail();
@@ -893,30 +855,30 @@ public:
         switch (l) {
         case BC_L_READ:
           Logger::log("CALL\tLread");
-          push(call_runtime_function(Lread));
+          VirtStack::push(call_runtime_function(Lread));
           break;
 
         case BC_L_WRITE: {
           Logger::log("CALL\tLwrite");
-          push(call_runtime_function(Lwrite));
+          VirtStack::push(call_runtime_function(Lwrite));
           break;
         }
         case BC_L_LENGTH:
           Logger::log("CALL\tLlength");
-          push(call_runtime_function(Llength));
+          VirtStack::push(call_runtime_function(Llength));
           break;
 
         case BC_L_STRING:
           Logger::log("CALL\tLstring");
-          push(call_runtime_function(Lstring));
+          VirtStack::push(call_runtime_function(Lstring));
           break;
 
         case BC_L_ARRAY: {
           int n = read_int();
           Logger::log("CALL\tBarray\t", n);
           swap_args(n);
-          push(BOX(n));
-          push(call_runtime_function(Barray, n));
+          VirtStack::push(BOX(n));
+          VirtStack::push(call_runtime_function(Barray, n));
           break;
         }
         default:

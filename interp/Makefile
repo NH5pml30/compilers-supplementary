@@ -1,6 +1,6 @@
 CC=gcc
 CCXX=g++
-FLAGS=-m32 -g2 -fstack-protector-all -O3
+FLAGS=-m32 -g2 -fstack-protector-all -O3 -DNDEBUG
 # FLAGS=-m32 -g2 -fstack-protector-all -O0 -DDEBUG
 
 all: interp.o interp_util.s gc.o runtime.o
