@@ -1,5 +1,5 @@
-CC=gcc
-CCXX=g++
+CC=clang
+CCXX=clang++
 FLAGS=-std=c++17 -m32 -g2 -fstack-protector-all -O3
 
 all: freqanalyzer.o

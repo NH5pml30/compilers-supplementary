@@ -8,6 +8,7 @@ all:
 	$(MAKE) -C src
 	$(MAKE) -C runtime
 	$(MAKE) -C byterun
+	$(MAKE) -C freqanalyzer
 	$(MAKE) -C stdlib
 	$(MAKE) -C runtime unit_tests.o
 	$(MAKE) -C runtime invariants_check.o
@@ -48,4 +49,5 @@ clean:
 	$(MAKE) clean -C stdlib
 	$(MAKE) clean -C regression
 	$(MAKE) clean -C byterun
+	$(MAKE) clean -C freqanalyzer
 	$(MAKE) clean -C bench
